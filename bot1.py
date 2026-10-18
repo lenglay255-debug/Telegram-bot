@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 from google import genai
@@ -10,27 +9,23 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-
-# ==================================
-# FILL YOUR API KEYS HERE
-# ==================================
-
 import os
+
+# ==================================
+# CONFIGURATION & API KEYS
+# ==================================
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ==================================
-# GEMINI CONFIGURATION
-# ==================================
-
-MODEL = "gemini-flash-latest"
+# ប្រើប្រាស់ Model ថ្មី និងស្តង់ដាររបស់ Google GenAI SDK
+MODEL = "gemini-2.0-flash"
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 logging.basicConfig(level=logging.INFO)
 
-# Store chat sessions in memory
+# Store chat sessions and locks in memory
 sessions = {}
 locks = {}
 
@@ -66,19 +61,16 @@ def get_session(user_id):
                 "system_instruction": SYSTEM_PROMPT
             }
         )
-
     return sessions[user_id]
 
 
 def generate_answer(user_id, question):
     chat = get_session(user_id)
     response = chat.send_message(question)
-
     return response.text or "No response generated."
 
 
 async def send_answer(message, answer):
-    # Telegram has a message length limit
     while answer:
         chunk = answer[:4000]
         answer = answer[4000:]
@@ -86,13 +78,10 @@ async def send_answer(message, answer):
 
 
 # ==================================
-# /start COMMAND
+# COMMANDS (/start, /reset, /help)
 # ==================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Welcome to Gemini AI Bot!\n\n"
         "🇰🇭 សួស្តី! ខ្ញុំជា Gemini AI Bot។\n\n"
@@ -110,32 +99,15 @@ async def start(
     )
 
 
-# ==================================
-# /reset COMMAND
-# ==================================
-
-async def reset(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     async with get_lock(user_id):
         sessions.pop(user_id, None)
 
-    await update.message.reply_text(
-        "🔄 Memory cleared successfully!"
-    )
+    await update.message.reply_text("🔄 Memory cleared successfully!")
 
 
-# ==================================
-# /help COMMAND
-# ==================================
-
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 Gemini AI Bot\n\n"
         "Send me any text question.\n"
@@ -148,10 +120,7 @@ async def help_command(
 # MESSAGE HANDLER
 # ==================================
 
-async def handle_message(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
 
@@ -172,47 +141,36 @@ async def handle_message(
             )
 
         except Exception as error:
-            logging.exception("Gemini error")
-
+            logging.exception("Gemini error occurred")
             error_text = str(error).lower()
 
             if "429" in error_text:
-                answer = (
-                    "⚠️ Gemini API rate limit reached. "
-                    "Please try again later."
-                )
-
+                answer = "⚠️ Gemini API rate limit reached. Please try again later."
             elif "404" in error_text:
-                answer = (
-                    "⚠️ Gemini model not available. "
-                    "Check the model name."
-                )
-
+                answer = "⚠️ Gemini model not available. Please check the model name."
             elif "403" in error_text or "api key" in error_text:
-                answer = (
-                    "⚠️ API key error. "
-                    "Please check your Gemini API key."
-                )
-
+                answer = "⚠️ API key error. Please check your Gemini API key."
             else:
-                answer = (
-                    "❌ AI connection error. "
-                    "Please try again."
-                )
+                answer = f"❌ AI connection error: {str(error)[:100]}"
 
         await send_answer(update.message, answer)
 
 
 # ==================================
-# MAIN BOT
+# ERROR HANDLER (Fixes the warning)
+# ==================================
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logging.error("Exception while handling an update:", exc_info=context.error)
+
+
+# ==================================
+# MAIN BOT INITIALIZATION
 # ==================================
 
 def main():
-    if (
-        TELEGRAM_TOKEN.startswith("PUT_")
-        or GEMINI_API_KEY.startswith("PUT_")
-    ):
-        print("❌ Please enter your API keys first!")
+    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
+        print("❌ Please set TELEGRAM_TOKEN and GEMINI_API_KEY environment variables!")
         return
 
     app = (
@@ -221,16 +179,14 @@ def main():
         .build()
     )
 
+    # Register handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            handle_message
-        )
-    )
+    # Register error handler to avoid missing error handler logs
+    app.add_error_handler(error_handler)
 
     print("==============================")
     print("🤖 GEMINI TELEGRAM BOT")
