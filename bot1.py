@@ -1,6 +1,5 @@
 
 import os
-import re
 import asyncio
 import logging
 import threading
@@ -8,7 +7,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from google import genai
 from google.genai import types
-
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -19,345 +17,184 @@ from telegram.ext import (
     filters,
 )
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
+# ==========================
+# CONFIG
+# ==========================
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    format="%(asctime)s %(levelname)s %(message)s"
 )
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("GEMINI_API_KEY")
-
 PREFERRED_MODEL = os.getenv(
-    "GEMINI_MODEL",
-    "gemini-2.5-flash"
+    "GEMINI_MODEL", "gemini-2.5-flash"
 )
 
 if not TOKEN or not API_KEY:
     raise RuntimeError(
-        "Please set TELEGRAM_TOKEN and GEMINI_API_KEY"
+        "Missing TELEGRAM_TOKEN or GEMINI_API_KEY"
     )
 
 client = genai.Client(api_key=API_KEY)
 
+SYSTEM_PROMPT = """
+You are a smart educational Telegram AI assistant.
+
+Your capabilities:
+- Answer questions in Khmer and English
+- Understand images and handwritten homework
+- Solve mathematics step by step
+- Explain physics and chemistry
+- Help with programming
+- Translate languages
+- Explain school exercises clearly
+
+Rules:
+1. Always reply in the user's language.
+2. For mathematics, show each solution step.
+3. Read images carefully.
+4. If an image is unclear, ask for a better photo.
+5. Never invent information.
+6. Be friendly, helpful, and accurate.
+"""
+
 sessions = {}
-user_locks = {}
+locks = {}
 available_models = []
 active_model = None
 
-# ==========================================
-# INTELLIGENT AI SYSTEM PROMPT
-# ==========================================
 
-SYSTEM_PROMPT = """
-You are an advanced, intelligent AI tutor.
-
-Your main priority is:
-ACCURACY, DEEP REASONING, LOGICAL THINKING,
-AND STEP-BY-STEP PROBLEM SOLVING.
-
-You are especially skilled at:
-- Mathematics
-- Physics
-- Chemistry
-- Biology
-- Programming
-- Logical reasoning
-- Image-based homework
-- Khmer education
-
-LANGUAGE:
-- Answer Khmer questions in natural Khmer.
-- Answer English questions in English.
-- Explain difficult ideas clearly.
-- Use appropriate educational terminology.
-
-REASONING INSTRUCTIONS:
-
-1. Understand the problem carefully before answering.
-2. Identify the given information and the goal.
-3. Choose the correct mathematical or scientific method.
-4. Work through the necessary calculations carefully.
-5. Check calculations, signs, units, and assumptions.
-6. Explain the important solution steps clearly.
-7. Give the final answer separately.
-8. If uncertain, say what is uncertain.
-9. Never invent facts or missing values.
-10. For difficult problems, prioritize correctness
-    over speed or unnecessary verbosity.
-
-MATHEMATICS FORMATTING:
-
-IMPORTANT:
-Telegram does not automatically render LaTeX.
-
-Never use:
-- Dollar signs around mathematics
-- Double dollar signs
-- LaTeX display delimiters
-- \\frac
-- \\sqrt
-- \\begin
-- \\end
-- \\boxed
-- \\left
-- \\right
-- \\displaystyle
-- \\mathrm
-- \\text
-
-Instead use readable Unicode mathematics:
-
-x² + 5x + 6 = 0
-√25 = 5
-a × b
-a ÷ b
-x ≤ 10
-x ≥ 2
-x ≠ 0
-π ≈ 3.14159
-
-For fractions, use:
-(a + b) / (c + d)
-
-For powers, use:
-x², x³, x⁴ or x^(n)
-
-For square roots, use:
-√(x + 2)
-
-For equations, put each important step
-on its own line.
-
-Example:
-
-📚 លំហាត់៖
-ដោះស្រាយសមីការ៖
-x² - 5x + 6 = 0
-
-✏️ ជំហានទី ១៖ បំបែកជាកត្តា
-
-(x - 2)(x - 3) = 0
-
-✏️ ជំហានទី ២៖
-
-x - 2 = 0  ឬ  x - 3 = 0
-
-ដូច្នេះ៖
-x = 2  ឬ  x = 3
-
-✅ ចម្លើយ៖ x = 2 ឬ x = 3
-
-IMAGE ANALYSIS:
-
-When a user sends a homework image:
-- Read the image carefully.
-- Identify the actual question.
-- Do not guess unclear numbers or symbols.
-- Solve the problem logically.
-- Explain each important step.
-- Verify the final result.
-- If unreadable, request a clearer image.
-
-PROGRAMMING:
-- Provide correct, runnable code.
-- Explain important logic when helpful.
-- Help debug errors carefully.
-
-Do not reveal private internal reasoning.
-Instead, give a clear, useful explanation
-of the solution steps and verification.
-
-Be helpful, accurate, and patient.
-"""
-
-# ==========================================
-# HEALTH SERVER FOR RENDER
-# ==========================================
+# ==========================
+# RENDER HTTP SERVER
+# ==========================
 
 class HealthHandler(BaseHTTPRequestHandler):
-
     def do_GET(self):
         self.send_response(200)
         self.send_header(
-            "Content-Type",
-            "text/plain; charset=utf-8"
+            "Content-Type", "text/plain"
         )
         self.end_headers()
-        self.wfile.write(b"Gemini AI Bot is running")
+        self.wfile.write(b"Telegram AI Bot Running")
 
     def log_message(self, *args):
         pass
 
 
-def start_health_server():
+def run_health_server():
     port = int(os.getenv("PORT", "10000"))
-
     server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
+        ("0.0.0.0", port), HealthHandler
     )
-
-    logging.info("Health server started on %s", port)
+    logging.info("HTTP server on port %s", port)
     server.serve_forever()
 
 
-# ==========================================
+# ==========================
 # GEMINI MODEL DISCOVERY
-# ==========================================
+# ==========================
 
 def discover_models():
     global available_models
 
-    found = []
+    names = []
 
-    for item in client.models.list():
-
-        name = getattr(item, "name", "") or ""
-
-        if not name:
-            continue
-
-        name = name.replace("models/", "", 1)
-        lower = name.lower()
-
-        if not lower.startswith("gemini"):
-            continue
-
+    for model in client.models.list():
         actions = getattr(
-            item,
-            "supported_actions",
-            None
+            model, "supported_actions", None
         )
 
         if actions is not None:
             if "generateContent" not in actions:
                 continue
 
-        excluded = [
-            "embedding",
-            "tts",
-            "live",
-            "image-generation",
-            "native-audio",
-            "computer-use",
-        ]
+        name = model.name.replace("models/", "")
 
-        if any(x in lower for x in excluded):
-            continue
+        # Prefer general-purpose text/image models
+        if (
+            "gemini" in name.lower()
+            and "embedding" not in name.lower()
+            and "tts" not in name.lower()
+            and "image" not in name.lower()
+            and "live" not in name.lower()
+        ):
+            names.append(name)
 
-        found.append(name)
-
-    def model_priority(name):
-
+    def priority(name):
         if name == PREFERRED_MODEL:
             return (0, name)
-
-        if "pro" in name:
-            return (1, name)
-
-        if "flash" in name and "lite" not in name:
-            return (2, name)
-
         if "flash-lite" in name:
-            return (3, name)
-
-        return (4, name)
+            return (1, name)
+        if "flash" in name:
+            return (2, name)
+        return (3, name)
 
     available_models = sorted(
-        set(found),
-        key=model_priority
+        set(names), key=priority
     )
 
     logging.info(
-        "Available models: %s",
-        available_models
+        "Available models: %s", available_models
     )
 
     return available_models
 
 
-# ==========================================
-# USER SESSIONS
-# ==========================================
-
-def get_user_lock(user_id):
-
-    if user_id not in user_locks:
-        user_locks[user_id] = asyncio.Lock()
-
-    return user_locks[user_id]
+def get_lock(user_id):
+    if user_id not in locks:
+        locks[user_id] = asyncio.Lock()
+    return locks[user_id]
 
 
 def create_chat(model):
-
-    config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
-        temperature=0.2,
-    )
-
     return client.chats.create(
         model=model,
-        config=config
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT
+        )
     )
 
 
 def is_model_not_found(error):
-
-    message = str(error).lower()
-
+    text = str(error).lower()
     return (
-        "404" in message
-        or "not_found" in message
-        or "not found" in message
+        "404" in text
+        or "not_found" in text
+        or "not found" in text
     )
 
 
-# ==========================================
-# ASK GEMINI AI
-# ==========================================
-
-def ask_gemini(user_id, question, image_bytes=None):
-
+def ask_ai(user_id, question, image_bytes=None):
     global active_model
 
     if not available_models:
-        discover_models()
-
-    if not available_models:
         raise RuntimeError(
-            "No available Gemini models found"
+            "No Gemini generation models available"
         )
 
     if image_bytes is not None:
-
         content = [
-            types.Part.from_text(
-                text=question
-            ),
+            types.Part.from_text(text=question),
             types.Part.from_bytes(
                 data=image_bytes,
                 mime_type="image/jpeg"
             )
         ]
-
     else:
         content = question
 
-    saved_session = sessions.get(user_id)
+    # Keep the user's existing conversation
+    saved = sessions.get(user_id)
 
     candidates = list(available_models)
 
-    if saved_session:
-        saved_model = saved_session["model"]
-
-        if saved_model in candidates:
-            candidates.remove(saved_model)
-            candidates.insert(0, saved_model)
-
+    if saved:
+        old_model = saved["model"]
+        if old_model in candidates:
+            candidates.remove(old_model)
+            candidates.insert(0, old_model)
     elif active_model in candidates:
         candidates.remove(active_model)
         candidates.insert(0, active_model)
@@ -365,26 +202,13 @@ def ask_gemini(user_id, question, image_bytes=None):
     last_error = None
 
     for model in candidates:
-
         try:
-
-            if (
-                saved_session
-                and saved_session["model"] == model
-            ):
-                chat = saved_session["chat"]
+            if saved and saved["model"] == model:
+                chat = saved["chat"]
             else:
                 chat = create_chat(model)
 
             response = chat.send_message(content)
-
-            answer = response.text
-
-            if not answer:
-                answer = (
-                    "សូមអភ័យទោស "
-                    "AI មិនបានផ្តល់ចម្លើយទេ។"
-                )
 
             sessions[user_id] = {
                 "model": model,
@@ -393,520 +217,209 @@ def ask_gemini(user_id, question, image_bytes=None):
 
             active_model = model
 
-            return answer
+            return (
+                response.text
+                or "⚠️ AI did not return a text answer."
+            )
 
         except Exception as error:
-
             last_error = error
 
             if is_model_not_found(error):
-
                 logging.warning(
-                    "Model not available: %s",
-                    model
+                    "Model %s unavailable: %s",
+                    model, error
                 )
-
                 continue
 
+            # Do not retry quota/key/network errors
+            # on other models automatically.
             raise
 
     raise RuntimeError(
-        "All Gemini models failed: "
+        "All discovered models failed: "
         + str(last_error)
     )
 
 
-# ==========================================
-# LATEX AND MATH CLEANER
-# ==========================================
+def error_message(error):
+    text = str(error).lower()
 
-SUPERSCRIPTS = str.maketrans({
-    "0": "⁰",
-    "1": "¹",
-    "2": "²",
-    "3": "³",
-    "4": "⁴",
-    "5": "⁵",
-    "6": "⁶",
-    "7": "⁷",
-    "8": "⁸",
-    "9": "⁹",
-    "-": "⁻",
-    "+": "⁺",
-    "n": "ⁿ",
-    "i": "ⁱ",
-})
-
-
-def replace_fractions(text):
-    """
-    Convert simple and nested LaTeX fractions.
-    """
-
-    pattern = re.compile(
-        r"\\(?:dfrac|tfrac|frac)\s*"
-        r"\{([^{}]*)\}\s*\{([^{}]*)\}"
-    )
-
-    for _ in range(10):
-
-        new_text = pattern.sub(
-            lambda match: (
-                "(" + match.group(1) + ") / "
-                "(" + match.group(2) + ")"
-            ),
-            text
+    if "429" in text:
+        return (
+            "⚠️ Gemini API quota exceeded.\n"
+            "សូមរង់ចាំ ឬពិនិត្យ API quota។"
         )
 
-        if new_text == text:
-            break
+    if "403" in text or "api key" in text:
+        return (
+            "⚠️ API Key ឬ Permission មានបញ្ហា។"
+        )
 
-        text = new_text
-
-    return text
-
-
-def replace_roots(text):
-
-    text = re.sub(
-        r"\\sqrt\s*\[([^\]]+)\]\s*\{([^{}]+)\}",
-        lambda m: (
-            "(" + m.group(2) + ")^(1/"
-            + m.group(1) + ")"
-        ),
-        text
-    )
-
-    text = re.sub(
-        r"\\sqrt\s*\{([^{}]+)\}",
-        lambda m: "√(" + m.group(1) + ")",
-        text
-    )
-
-    return text
-
-
-def replace_powers(text):
-
-    def convert_power(match):
-
-        power = match.group(1)
-
-        if all(
-            character in SUPERSCRIPTS
-            for character in power
-        ):
-            return power.translate(SUPERSCRIPTS)
-
-        return "^(" + power + ")"
-
-    text = re.sub(
-        r"\^\{([^{}]+)\}",
-        convert_power,
-        text
-    )
-
-    text = re.sub(
-        r"\^([0-9]+)",
-        lambda m: m.group(1).translate(SUPERSCRIPTS),
-        text
-    )
-
-    return text
-
-
-def clean_answer(text):
-
-    if not text:
-        return ""
-
-    # Remove math delimiters
-    text = text.replace("$$", "")
-    text = text.replace("$", "")
-
-    text = text.replace(r"\(", "")
-    text = text.replace(r"\)", "")
-    text = text.replace(r"\[", "")
-    text = text.replace(r"\]", "")
-
-    # Remove common LaTeX formatting commands
-    for command in [
-        r"\displaystyle",
-        r"\textstyle",
-        r"\left",
-        r"\right",
-        r"\!",
-        r"\,",
-        r"\;",
-        r"\quad",
-        r"\qquad",
-    ]:
-        text = text.replace(command, " ")
-
-    # Convert fractions and roots
-    text = replace_fractions(text)
-    text = replace_roots(text)
-
-    # Replace math symbols
-    replacements = {
-        r"\times": "×",
-        r"\cdot": "·",
-        r"\div": "÷",
-        r"\pm": "±",
-        r"\mp": "∓",
-        r"\pi": "π",
-        r"\alpha": "α",
-        r"\beta": "β",
-        r"\gamma": "γ",
-        r"\delta": "δ",
-        r"\theta": "θ",
-        r"\lambda": "λ",
-        r"\mu": "μ",
-        r"\sigma": "σ",
-        r"\omega": "ω",
-        r"\infty": "∞",
-        r"\leq": "≤",
-        r"\le": "≤",
-        r"\geq": "≥",
-        r"\ge": "≥",
-        r"\neq": "≠",
-        r"\ne": "≠",
-        r"\approx": "≈",
-        r"\equiv": "≡",
-        r"\rightarrow": "→",
-        r"\Rightarrow": "⇒",
-        r"\Leftrightarrow": "⇔",
-        r"\in": "∈",
-        r"\notin": "∉",
-        r"\subseteq": "⊆",
-        r"\cup": "∪",
-        r"\cap": "∩",
-        r"\sum": "Σ",
-        r"\prod": "Π",
-        r"\int": "∫",
-        r"\partial": "∂",
-        r"\nabla": "∇",
-        r"\degree": "°",
-    }
-
-    # Longer commands first
-    for old, new in sorted(
-        replacements.items(),
-        key=lambda x: len(x[0]),
-        reverse=True
+    if (
+        "404" in text
+        or "no gemini" in text
+        or "all discovered models" in text
     ):
-        text = text.replace(old, new)
-
-    # Convert simple LaTeX text wrappers
-    text = re.sub(
-        r"\\(?:text|mathrm|mathbf|mathit|operatorname)"
-        r"\{([^{}]*)\}",
-        r"\1",
-        text
-    )
-
-    # Convert powers
-    text = replace_powers(text)
-
-    # Remove remaining math delimiters
-    text = text.replace("$$", "")
-    text = text.replace("$", "")
-
-    # Remove Markdown emphasis markers,
-    # but preserve code blocks and underscores.
-    text = text.replace("**", "")
-
-    # Clean unnecessary whitespace
-    text = re.sub(
-        r"[ \t]{3,}",
-        "  ",
-        text
-    )
-
-    text = re.sub(
-        r"\n{4,}",
-        "\n\n\n",
-        text
-    )
-
-    return text.strip()
-
-
-# ==========================================
-# SEND LONG TELEGRAM MESSAGES
-# ==========================================
-
-async def send_long_message(message, text):
-
-    text = clean_answer(text)
-
-    if not text:
-        text = "AI មិនបានផ្តល់ចម្លើយទេ។"
-
-    max_length = 3900
-
-    while text:
-
-        if len(text) <= max_length:
-            await message.reply_text(text)
-            break
-
-        cut = text.rfind("\n", 0, max_length)
-
-        if cut < max_length // 2:
-            cut = max_length
-
-        part = text[:cut].strip()
-
-        if part:
-            await message.reply_text(part)
-
-        text = text[cut:].strip()
-
-
-# ==========================================
-# ERROR HANDLING
-# ==========================================
-
-def format_error(error):
-
-    message = str(error).lower()
-
-    if "429" in message:
         return (
-            "⚠️ Gemini API អស់ Quota "
-            "ឬមានសំណើច្រើនពេក។\n"
-            "សូមរង់ចាំបន្តិច ហើយសាកល្បងម្តងទៀត។"
-        )
-
-    if "401" in message or "403" in message:
-        return (
-            "⚠️ Gemini API Key ឬ Permission "
-            "មានបញ្ហា។"
-        )
-
-    if "404" in message or "model" in message:
-        return (
-            "⚠️ Gemini Model មិនអាចប្រើបាន។\n"
-            "សូមពិនិត្យ /models។"
-        )
-
-    if "timeout" in message:
-        return (
-            "⚠️ AI ឆ្លើយយឺតពេក។ "
-            "សូមសាកល្បងម្តងទៀត។"
+            "⚠️ មិនអាចប្រើ Gemini Model បាន។\n"
+            "សូមពិនិត្យ Render Logs។"
         )
 
     return (
-        "❌ មានបញ្ហាក្នុងការភ្ជាប់ Gemini AI។\n"
+        "❌ AI មានបញ្ហា។\n"
         "សូមពិនិត្យ Render Logs។"
     )
 
 
-# ==========================================
-# TELEGRAM COMMANDS
-# ==========================================
+async def send_answer(message, answer):
+    for i in range(0, len(answer), 4000):
+        await message.reply_text(
+            answer[i:i + 4000]
+        )
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
 
-    text = (
-        "🤖 សួស្តី! ខ្ញុំជា Gemini AI Tutor\n\n"
-        "🧠 គិត និងវិភាគបញ្ហាស្មុគស្មាញ\n"
+# ==========================
+# BOT COMMANDS
+# ==========================
+
+async def start(update: Update, context):
+    await update.message.reply_text(
+        "🤖 សួស្តី! ខ្ញុំជា Gemini AI Bot!\n\n"
+        "📸 ផ្ញើរូបភាពលំហាត់\n"
         "🧮 ដោះស្រាយគណិតវិទ្យា\n"
-        "📸 អានរូបភាពលំហាត់\n"
-        "📚 ពន្យល់ជាភាសាខ្មែរ\n"
-        "🔬 រូបវិទ្យា និងគីមីវិទ្យា\n"
+        "📚 ជួយការសិក្សា\n"
         "💻 Programming\n"
-        "🌍 បកប្រែភាសា\n\n"
-        "ផ្ញើសំណួរ ឬរូបភាពមកបាន!\n\n"
-        "/reset - ចាប់ផ្តើមការសន្ទនាថ្មី\n"
-        "/models - មើល Gemini Models\n"
-        "/help - ជំនួយ"
+        "🌍 បកប្រែភាសា\n"
+        "🧠 សន្ទនាជាមួយ AI\n\n"
+        "/models - Show Gemini models\n"
+        "/reset - Clear conversation\n"
+        "/help - Help"
     )
 
-    await update.message.reply_text(text)
 
-
-async def reset(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def reset(update: Update, context):
     user_id = update.effective_user.id
 
-    async with get_user_lock(user_id):
+    async with get_lock(user_id):
         sessions.pop(user_id, None)
 
     await update.message.reply_text(
-        "✅ បានសម្អាតប្រវត្តិសន្ទនារួចរាល់!"
+        "✅ បានសម្អាតការសន្ទនារួចរាល់!"
     )
 
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def help_command(update: Update, context):
     await update.message.reply_text(
-        "📚 Gemini AI Tutor\n\n"
-        "សួរសំណួរគណិតវិទ្យា "
-        "ឬផ្ញើរូបភាពលំហាត់។\n\n"
-        "Bot នឹងព្យាយាមវិភាគ "
-        "ដោះស្រាយជាជំហានៗ "
-        "និងពិនិត្យចម្លើយ។\n\n"
-        "/reset - New conversation\n"
-        "/models - Available models"
+        "🤖 Gemini AI Assistant\n\n"
+        "Send text or photos.\n"
+        "I can explain homework in Khmer.\n\n"
+        "/models - Available models\n"
+        "/reset - Clear conversation"
     )
 
 
-async def models_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def models_command(update: Update, context):
     try:
-
-        found = await asyncio.to_thread(
+        models = await asyncio.to_thread(
             discover_models
         )
 
-        if not found:
+        if not models:
             await update.message.reply_text(
-                "⚠️ មិនមាន Gemini Model ដែលអាចប្រើបាន។"
+                "⚠️ No models found."
             )
             return
 
         names = "\n".join(
-            "• " + model
-            for model in found[:20]
+            "• " + name for name in models[:15]
         )
-
-        selected = active_model or found[0]
 
         await update.message.reply_text(
             "🤖 Available Gemini Models:\n\n"
             + names
-            + "\n\nCurrently selected:\n"
-            + selected
+            + "\n\nSelected: "
+            + str(active_model or models[0])
         )
 
     except Exception as error:
-
-        logging.exception("Models command failed")
-
+        logging.exception("Model list error")
         await update.message.reply_text(
-            format_error(error)
+            error_message(error)
         )
 
 
-# ==========================================
-# TEXT MESSAGES
-# ==========================================
+# ==========================
+# TEXT MESSAGE
+# ==========================
 
-async def handle_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def handle_text(update: Update, context):
     user_id = update.effective_user.id
     question = update.message.text
 
-    async with get_user_lock(user_id):
-
+    async with get_lock(user_id):
         try:
-
             await context.bot.send_chat_action(
                 chat_id=update.effective_chat.id,
                 action=ChatAction.TYPING
             )
 
             answer = await asyncio.to_thread(
-                ask_gemini,
-                user_id,
-                question
+                ask_ai, user_id, question
             )
 
         except Exception as error:
+            logging.exception("Text AI error")
+            answer = error_message(error)
 
-            logging.exception("Text message error")
-            answer = format_error(error)
-
-        await send_long_message(
-            update.message,
-            answer
-        )
+        await send_answer(update.message, answer)
 
 
-# ==========================================
-# PHOTO MESSAGES
-# ==========================================
+# ==========================
+# PHOTO MESSAGE
+# ==========================
 
-async def handle_photo(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def handle_photo(update: Update, context):
     user_id = update.effective_user.id
 
     question = (
         update.message.caption
-        or (
-            "សូមអានលំហាត់ក្នុងរូបភាពនេះឱ្យបានច្បាស់។ "
-            "វិភាគបញ្ហា ហើយដោះស្រាយជាជំហានៗ។ "
-            "ពន្យល់ជាភាសាខ្មែរ "
-            "និងពិនិត្យចម្លើយចុងក្រោយ។ "
-            "សូមប្រើរូបមន្តងាយអាន "
-            "ដោយគ្មានសញ្ញា LaTeX។"
-        )
+        or "សូមមើលរូបភាពនេះ និងដោះស្រាយ"
+           "លំហាត់ជាជំហានៗជាភាសាខ្មែរ។"
     )
 
-    async with get_user_lock(user_id):
-
+    async with get_lock(user_id):
         try:
-
             await context.bot.send_chat_action(
                 chat_id=update.effective_chat.id,
                 action=ChatAction.TYPING
             )
 
             photo = update.message.photo[-1]
-
             file = await photo.get_file()
 
             data = await file.download_as_bytearray()
-
             image_bytes = bytes(data)
 
             answer = await asyncio.to_thread(
-                ask_gemini,
+                ask_ai,
                 user_id,
                 question,
                 image_bytes
             )
 
         except Exception as error:
+            logging.exception("Photo AI error")
+            answer = error_message(error)
 
-            logging.exception("Photo message error")
-            answer = format_error(error)
-
-        await send_long_message(
-            update.message,
-            answer
-        )
+        await send_answer(update.message, answer)
 
 
-# ==========================================
-# GLOBAL ERROR HANDLER
-# ==========================================
+# ==========================
+# TELEGRAM ERROR HANDLER
+# ==========================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
+async def error_handler(update, context):
     logging.error(
         "Telegram error: %s",
         context.error,
@@ -914,22 +427,26 @@ async def error_handler(
     )
 
 
-# ==========================================
+# ==========================
 # MAIN
-# ==========================================
+# ==========================
 
 def main():
-
     try:
-        discover_models()
+        models = discover_models()
+
+        if not models:
+            logging.warning(
+                "No Gemini generation models found"
+            )
 
     except Exception:
         logging.exception(
-            "Initial model discovery failed"
+            "Failed to discover Gemini models"
         )
 
     threading.Thread(
-        target=start_health_server,
+        target=run_health_server,
         daemon=True
     ).start()
 
@@ -939,18 +456,9 @@ def main():
         .build()
     )
 
-    app.add_handler(
-        CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        CommandHandler("reset", reset)
-    )
-
-    app.add_handler(
-        CommandHandler("help", help_command)
-    )
-
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(
         CommandHandler("models", models_command)
     )
@@ -971,13 +479,8 @@ def main():
 
     app.add_error_handler(error_handler)
 
-    logging.info(
-        "Gemini AI Tutor is starting..."
-    )
-
-    app.run_polling(
-        drop_pending_updates=True
-    )
+    logging.info("Telegram Gemini Bot starting...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
