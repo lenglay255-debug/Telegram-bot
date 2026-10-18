@@ -1,5 +1,6 @@
 
 import os
+import io
 import asyncio
 import logging
 import threading
@@ -17,50 +18,72 @@ from telegram.ext import (
     filters,
 )
 
+# =========================
+# CONFIGURATION
+# =========================
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s"
 )
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Set GEMINI_MODEL in Render if needed.
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+if not TOKEN or not API_KEY:
+    raise RuntimeError("Missing Telegram or Gemini API key")
+
+client = genai.Client(api_key=API_KEY)
 
 SYSTEM_PROMPT = """
-You are a helpful and intelligent Telegram AI bot.
-Answer questions in Khmer or English.
-Always reply in the user's language.
-Help with programming, schoolwork, mathematics,
-translation, writing, and general questions.
-Explain clearly and accurately.
+You are an intelligent educational Telegram AI assistant.
+
+You can:
+- Answer in Khmer and English
+- Analyze photos and handwritten exercises
+- Solve mathematics step by step
+- Explain physics and chemistry
+- Help with homework and programming
+- Translate languages
+- Explain difficult concepts simply
+
+Rules:
+1. Always respond in the user's language.
+2. For math, show formulas and solution steps.
+3. For images, carefully read the question.
+4. If image text is unclear, ask for a clearer photo.
+5. Never invent missing information.
+6. Be friendly, accurate, and educational.
 """
 
 sessions = {}
 locks = {}
 
-client = None
+# =========================
+# RENDER HEALTH SERVER
+# =========================
 
-
-# HTTP server for Render
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Telegram bot service running")
+        self.wfile.write(b"Gemini Telegram Bot Running")
 
-    def log_message(self, format, *args):
+    def log_message(self, *args):
         pass
 
 
-def start_health_server():
+def health_server():
     port = int(os.getenv("PORT", "10000"))
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    logging.info("HTTP server listening on port %s", port)
     server.serve_forever()
 
+
+# =========================
+# GEMINI FUNCTIONS
+# =========================
 
 def get_lock(user_id):
     if user_id not in locks:
@@ -68,7 +91,7 @@ def get_lock(user_id):
     return locks[user_id]
 
 
-def generate_answer(user_id, question):
+def get_chat(user_id):
     if user_id not in sessions:
         sessions[user_id] = client.chats.create(
             model=MODEL,
@@ -76,28 +99,60 @@ def generate_answer(user_id, question):
                 system_instruction=SYSTEM_PROMPT
             )
         )
-
-    response = sessions[user_id].send_message(question)
-    return response.text or "No text response generated."
+    return sessions[user_id]
 
 
-async def send_long_message(message, text):
-    for i in range(0, len(text), 4000):
-        await message.reply_text(text[i:i + 4000])
+def ask_gemini(user_id, question, image_bytes=None):
+    chat = get_chat(user_id)
 
+    if image_bytes is not None:
+        content = [
+            types.Part.from_text(text=question),
+            types.Part.from_bytes(
+                data=image_bytes,
+                mime_type="image/jpeg"
+            )
+        ]
+    else:
+        content = question
+
+    response = chat.send_message(content)
+    return response.text or "No response generated."
+
+
+async def send_answer(message, answer):
+    for i in range(0, len(answer), 4000):
+        await message.reply_text(answer[i:i + 4000])
+
+
+def format_error(error):
+    logging.error("Gemini error: %s", error)
+    msg = str(error).lower()
+
+    if "429" in msg:
+        return "⚠️ Gemini quota exceeded. Try again later."
+    if "404" in msg:
+        return "⚠️ Model unavailable. Check GEMINI_MODEL."
+    if "403" in msg or "api key" in msg:
+        return "⚠️ API key or permission error."
+    return "❌ AI error. Please check Render logs."
+
+
+# =========================
+# BOT COMMANDS
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Welcome to Gemini AI Bot!\n\n"
-        "🇰🇭 សួស្តី! ខ្ញុំអាចជួយអ្នកបាន។\n\n"
-        "📚 Education\n"
+        "🤖 សួស្តី! ខ្ញុំជា Gemini AI Bot!\n\n"
+        "📸 ផ្ញើរូបភាពលំហាត់មកខ្ញុំ\n"
+        "🧮 ដោះស្រាយគណិតវិទ្យា\n"
+        "📚 ជួយការសិក្សា\n"
         "💻 Programming\n"
-        "🧮 Mathematics\n"
-        "🌍 Translation\n"
-        "✍️ Writing\n\n"
-        "Send me a question!\n\n"
-        "/reset - Clear conversation\n"
-        "/help - Show help"
+        "🌍 បកប្រែភាសា\n\n"
+        "អ្នកអាចផ្ញើសំណួរ ឬរូបភាពបាន!\n\n"
+        "/reset - Clear memory\n"
+        "/help - Help"
     )
 
 
@@ -107,96 +162,132 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with get_lock(user_id):
         sessions.pop(user_id, None)
 
-    await update.message.reply_text("✅ Memory cleared!")
+    await update.message.reply_text(
+        "✅ បានលុបប្រវត្តិសន្ទនារួចរាល់!"
+    )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🤖 Gemini AI Assistant\n\n"
-        "Ask me anything in Khmer or English.\n"
-        "/start - Start\n"
-        "/reset - Clear memory\n"
-        "/help - Help"
+        "🤖 Gemini AI Bot\n\n"
+        "📝 Send a text question\n"
+        "📸 Send a photo of homework\n"
+        "🧮 Ask for step-by-step solutions\n\n"
+        "/reset - New conversation"
     )
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text:
-        return
+# =========================
+# TEXT HANDLER
+# =========================
 
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     question = update.message.text
 
     async with get_lock(user_id):
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id,
+            action=ChatAction.TYPING
+        )
+
         try:
-            await context.bot.send_chat_action(
-                chat_id=update.effective_chat.id,
-                action=ChatAction.TYPING
+            answer = await asyncio.to_thread(
+                ask_gemini, user_id, question
             )
+        except Exception as error:
+            logging.exception("Text processing failed")
+            answer = format_error(error)
+
+        await send_answer(update.message, answer)
+
+
+# =========================
+# PHOTO HANDLER
+# =========================
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    question = (
+        update.message.caption
+        or "សូមអានរូបភាពនេះ ហើយដោះស្រាយលំហាត់ "
+           "ដោយពន្យល់លម្អិតជាជំហានៗជាភាសាខ្មែរ។"
+    )
+
+    async with get_lock(user_id):
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id,
+            action=ChatAction.TYPING
+        )
+
+        try:
+            photo = update.message.photo[-1]
+            file = await photo.get_file()
+
+            image_data = await file.download_as_bytearray()
+            image_bytes = bytes(image_data)
 
             answer = await asyncio.to_thread(
-                generate_answer, user_id, question
+                ask_gemini,
+                user_id,
+                question,
+                image_bytes
             )
 
         except Exception as error:
-            logging.exception("Gemini request failed")
-            error_text = str(error).lower()
+            logging.exception("Photo processing failed")
+            answer = format_error(error)
 
-            if "429" in error_text:
-                answer = "⚠️ API quota exceeded. Try again later."
-            elif "404" in error_text:
-                answer = (
-                    "⚠️ Gemini model unavailable.\n"
-                    "Check GEMINI_MODEL in Render."
-                )
-            elif "403" in error_text or "api key" in error_text:
-                answer = "⚠️ Gemini API key or permission error."
-            else:
-                answer = "❌ AI error. Check Render logs."
+        await send_answer(update.message, answer)
 
-        await send_long_message(update.message, answer)
 
+# =========================
+# ERROR HANDLER
+# =========================
 
 async def error_handler(update, context):
     logging.error(
-        "Telegram error",
-        exc_info=(
-            type(context.error),
-            context.error,
-            context.error.__traceback__
-        ) if context.error else None
+        "Telegram error: %s",
+        context.error,
+        exc_info=context.error
     )
 
 
+# =========================
+# START BOT
+# =========================
+
 def main():
-    global client
-
-    if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
-        raise RuntimeError(
-            "Missing TELEGRAM_TOKEN or GEMINI_API_KEY"
-        )
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
     threading.Thread(
-        target=start_health_server,
+        target=health_server,
         daemon=True
     ).start()
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset))
     app.add_handler(CommandHandler("help", help_command))
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            handle_message
+            handle_text
         )
     )
+
+    app.add_handler(
+        MessageHandler(
+            filters.PHOTO,
+            handle_photo
+        )
+    )
+
     app.add_error_handler(error_handler)
 
-    logging.info("Starting Telegram bot with model %s", MODEL)
+    logging.info("Gemini AI Bot starting: %s", MODEL)
+
     app.run_polling(drop_pending_updates=True)
 
 
