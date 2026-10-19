@@ -37,7 +37,7 @@ TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
 PREFERRED_MODEL = (
-    os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
     .strip()
     .removeprefix("models/")
 )
@@ -66,14 +66,14 @@ if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", TOKEN):
 # ============================================
 
 SAFE_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
 ]
 
 if PREFERRED_MODEL not in SAFE_MODELS:
     logging.warning(
         "GEMINI_MODEL %s is not allowed. "
-        "Using gemini-2.5-flash.",
+        "Using gemini-3.8-flash.",
         PREFERRED_MODEL
     )
     PREFERRED_MODEL = SAFE_MODELS[0]
@@ -285,7 +285,6 @@ def ask_gemini(user_id, question, image_bytes=None):
                 chat = create_chat(model)
                 sessions[user_id] = {"model": model, "chat": chat}
 
-            # Handle content formatting for new google-genai SDK
             if image_bytes is not None:
                 content = [
                     question,
@@ -418,7 +417,7 @@ def friendly_error(error):
     if isinstance(error, asyncio.TimeoutError):
         return "⏳ Gemini ឆ្លើយយឺតពេក។\nសូមសាកល្បងម្តងទៀត។"
 
-    return "❌ មានបញ្ហាក្នុងการភ្ជាប់ AI។\nសូមពិនិត្យ Render Logs។"
+    return "❌ មានបញ្ហាក្នុងការភ្ជាប់ AI។\nសូមពិនិត្យ Render Logs។"
 
 
 # ============================================
@@ -454,7 +453,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 Gemini AI Tutor\n\n"
-        "ផ្ើសំណួរ ឬរូបភាពលំហាត់។\n"
+        "ផ្ញើសំណួរ ឬរូបភាពលំហាត់។\n"
         "Bot នឹងព្យាយាមពន្យល់ជំហានៗ។\n\n"
         "/ping - Check Telegram\n"
         "/models - Check Models\n"
@@ -560,11 +559,11 @@ def main():
     app = (
         ApplicationBuilder()
         .token(TOKEN)
-        .connect_timeout(20)
+        .connect_timeout(30)
         .read_timeout(30)
         .write_timeout(30)
-        .pool_timeout(20)
-        .get_updates_connect_timeout(20)
+        .pool_timeout(30)
+        .get_updates_connect_timeout(30)
         .get_updates_read_timeout(30)
         .build()
     )
@@ -579,21 +578,21 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(error_handler)
 
-    try:
-        logging.info("Starting Telegram long polling")
-        app.run_polling(
-            drop_pending_updates=True,
-            poll_interval=1.0,
-            timeout=10,
-            bootstrap_retries=-1
-        )
-    except KeyboardInterrupt:
-        logging.info("Bot interrupted")
-    except Exception:
-        logging.exception("Telegram polling stopped unexpectedly")
-        raise
-    finally:
-        logging.warning("Telegram application has stopped")
+    while True:
+        try:
+            logging.info("Starting Telegram long polling")
+            app.run_polling(
+                drop_pending_updates=True,
+                poll_interval=2.0,
+                timeout=30,
+                bootstrap_retries=10
+            )
+        except KeyboardInterrupt:
+            logging.info("Bot interrupted by user")
+            break
+        except Exception as e:
+            logging.error("Telegram polling crashed: %s. Restarting in 5 seconds...", e)
+            time.sleep(5)
 
 
 if __name__ == "__main__":
